@@ -1,8 +1,7 @@
 # The new-leo-model repo.
 This repo contains code of proposed new data model for Leo. The so called *new
-data model* is at the moment contained in just one python file [leoDataModel.py](
-blob/master/leoDataModel.py). Other files in this repository are intended to
-demonstrate new data model in action.
+data model* is at the moment contained in just one python file [leoDataModel.py]. 
+Other files in this repository are intended to demonstrate new data model in action.
 
 Current version is the result of many experiments and prototypes I have built
 in last twelve months or so (July 2017 - July 2018).
