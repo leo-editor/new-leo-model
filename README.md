@@ -1,12 +1,12 @@
 # The new-leo-model repo.
 This repo contains code of proposed new data model for Leo. The so called *new
-data model* is at the moment contained in just one python file [leoDataModel.py]. 
+data model* is at the moment contained in just one python file [leoDataModel.py](leoDataModel.py). 
 Other files in this repository are intended to demonstrate new data model in action.
 
 Current version is the result of many experiments and prototypes I have built
 in last twelve months or so (July 2017 - July 2018).
 
-1. first experiments in [snippets/experiments](/leo-editor/snippets/blob/master/experiments/line-numbering.leo)
+1. first experiments in [snippets/experiments](https://github.com/leo-editor/snippets/blob/master/experiments/line-numbering.leo)
 2. Leo in ClojureScript [leo-cljs](https://repo.computingart.net/leocljs/home)
 3. Leo in CoffeeScript [leo-el-vue](https://leoelvue.computingart.net/index)
 
