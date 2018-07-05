@@ -961,14 +961,15 @@ class LeoTreeModel(object):
                 a += attrs[gnx].size
         attrs[pgnx].children[:] = chiter(pi + 1, pi + psz, i)
 
-        #attrs[pgnx].size -= sz0
         def movedata(j, ar):
             ar[j+di0: j+di3] = ar[j+di1:j+di3] + ar[j+di0:j+di1]
+
         def move_levels(j):
             a = j + di0
             b = j + di1
             levels[a:b] = [x-1 for x in levels[a:b]]
             movedata(j, levels)
+
         donepos = []
         for gxi in gnx_iter(nodes, gpgnx, attrs[gpgnx].size):
             donepos.append(positions[gxi + di2])
