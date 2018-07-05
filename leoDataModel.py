@@ -960,35 +960,31 @@ class LeoTreeModel(object):
                     yield gnx
                 a += attrs[gnx].size
         attrs[pgnx].children[:] = chiter(pi + 1, pi + psz, i)
-        attrs[pgnx].size -= sz0
+
+        #attrs[pgnx].size -= sz0
         def movedata(j, ar):
             ar[j+di0: j+di3] = ar[j+di1:j+di3] + ar[j+di0:j+di1]
+        def move_levels(j):
+            a = j + di0
+            b = j + di1
+            levels[a:b] = [x-1 for x in levels[a:b]]
+            movedata(j, levels)
+        donepos = []
+        for gxi in gnx_iter(nodes, gpgnx, attrs[gpgnx].size):
+            donepos.append(positions[gxi + di2])
+            movedata(gxi, positions)
+            movedata(gxi, nodes)
+            move_levels(gxi)
 
-        fordeletion = []
-        for pxi in gnx_iter(nodes, pgnx, psz):
-            gxi = pxi - di2
-            if gxi >= 0 and nodes[gxi] == gpgnx:
-                # just move data if necessary
-                if di1 != di3:
-                    movedata(gxi, positions)
-                    movedata(gxi, nodes)
-                    movedata(gxi, levels)
-                levels[gxi+di3-sz0:gxi+di3] = [x - 1 for x in levels[gxi+di3-sz0:gxi+di3]]
-            else:
-                # postpone deletion
-                j = pxi + di0 - di2
-                k = j + sz0
-                fordeletion.append((j, k))
-
-        for j, k in reversed(fordeletion):
-            del positions[j:k]
-            del levels[j:k]
-            del nodes[j:k]
-
-        xx = attrs[pgnx].parents[:]
-        xx.remove(gpgnx)
-        for x in xx:
-            update_size(attrs, x, -sz0)
+        for pxi in gnx_iter(nodes, pgnx, psz-sz0):
+            if positions[pxi] not in donepos:
+                a = pxi + di0 - di2
+                b = a + sz0
+                del positions[a:b]
+                del nodes[a:b]
+                del levels[a:b]
+        update_size(attrs, pgnx, -sz0)
+        update_size(attrs, gpgnx, sz0)
         self._update_children(gpgnx)
     #@+node:vitalije.20180518062711.1: *3* prev_visible_index
     def prev_visible_index(self, pos):
