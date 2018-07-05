@@ -950,16 +950,6 @@ class LeoTreeModel(object):
         di2 = pi - gpi
         di3 = di2 + psz
 
-        # replace parent with grandparent
-        mps[mps.index(pgnx)] = gpgnx
-
-        def chiter(a, b, skipIndex):
-            while a < b:
-                gnx = nodes[a]
-                if a != skipIndex:
-                    yield gnx
-                a += attrs[gnx].size
-        attrs[pgnx].children[:] = chiter(pi + 1, pi + psz, i)
 
         def movedata(j, ar):
             ar[j+di0: j+di3] = ar[j+di1:j+di3] + ar[j+di0:j+di1]
@@ -984,8 +974,14 @@ class LeoTreeModel(object):
                 del positions[a:b]
                 del nodes[a:b]
                 del levels[a:b]
+
         update_size(attrs, pgnx, -sz0)
         update_size(attrs, gpgnx, sz0)
+
+        # replace parent with grandparent
+        mps[mps.index(pgnx)] = gpgnx
+
+        self._update_children(pgnx)
         self._update_children(gpgnx)
     #@+node:vitalije.20180518062711.1: *3* prev_visible_index
     def prev_visible_index(self, pos):
