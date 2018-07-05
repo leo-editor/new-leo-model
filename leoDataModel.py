@@ -954,18 +954,21 @@ class LeoTreeModel(object):
         def movedata(j, ar):
             ar[j+di0: j+di3] = ar[j+di1:j+di3] + ar[j+di0:j+di1]
 
-        def move_levels(j):
+        def decrease_levels(j):
             a = j + di0
             b = j + di1
             levels[a:b] = [x-1 for x in levels[a:b]]
-            movedata(j, levels)
 
         donepos = []
         for gxi in gnx_iter(nodes, gpgnx, attrs[gpgnx].size):
             donepos.append(positions[gxi + di2])
-            movedata(gxi, positions)
-            movedata(gxi, nodes)
-            move_levels(gxi)
+            decrease_levels(gxi)
+            if di1 != di3:
+                # this node is not the last child of its parent
+                # we need to move data to the end of parent block
+                movedata(gxi, positions)
+                movedata(gxi, nodes)
+                movedata(gxi, levels)
 
         for pxi in gnx_iter(nodes, pgnx, psz-sz0):
             if positions[pxi] not in donepos:
