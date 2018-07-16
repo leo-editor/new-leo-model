@@ -222,6 +222,21 @@ def to_leo_pos(ltmdata, pos, c):
     p.v = v
     p._childIndex = i
     return p
+#@+node:vitalije.20180715224523.1: ** to_ltm_pos
+def to_ltm_pos(ltmdata, p):
+    (positions, nodes, attrs, levels, expanded, marked) = ltmdata
+    i = 0
+    for (v, ci) in p.stack:
+        i += 1
+        while ci:
+            i += attrs[i].size
+            ci -= 1
+    i += 1
+    ci = p._childIndex
+    while ci:
+        i += attrs[i].size
+        ci -= 1
+    return positions[i]
 #@+node:vitalije.20180613161708.1: ** LTMData
 LTMData = namedtuple('LTMData', 'positions nodes attrs levels expanded marked')
 
@@ -340,6 +355,13 @@ class LeoTreeModel(object):
         except ValueError:
             i = -1
         return i
+    #@+node:vitalije.20180715224624.1: *3* from_leo_pos
+    def from_leo_pos(self, p):
+        return to_ltm_pos(self.data, p)
+
+    def select_leo_pos(self, p):
+        self.selectedPosition = to_ltm_pos(self.data, p)
+        self._selectedIndex = self.data.positions.index(self.selectedPosition)
     #@+node:vitalije.20180613192634.1: *3* selectedGnx
     @property
     def selectedGnx(self):
@@ -425,6 +447,7 @@ class LeoTreeModel(object):
 
         attrs[gnx].parents.append(pgnx)
         self._update_children(pgnx)
+        return True
     #@+node:vitalije.20180616151338.1: *3* _update_children
     def _update_children(self, pgnx):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -538,6 +561,15 @@ class LeoTreeModel(object):
         pgnx = nodes[pi]
         psz = attrs[pgnx].size
 
+        # what to select after delete
+        if pos == self.selectedPosition:
+            if i + sz < len(positions):
+                select = positions[i + sz]
+            else:
+                select = positions[self.prev_node_index(i)]
+        else:
+            select = False
+
         # distance from parent
         pdist = i - pi
 
@@ -555,6 +587,10 @@ class LeoTreeModel(object):
         attrs[gnx].parents.remove(pgnx)
         self._update_children(pgnx)
         clean_parents(attrs, nodes, ns)
+        if select:
+            self.selectedPosition = select
+            self._selectedIndex = positions.index(select)
+        return True
     #@+node:vitalije.20180515122209.1: *3* display_items
     def display_items(self, skip=0, count=None):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -601,7 +637,13 @@ class LeoTreeModel(object):
     #@+node:vitalije.20180515155026.1: *3* select_prev_node
     def select_prev_node(self, ev=None):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
-        i = self.selectedIndex
+        j0 = self.prev_node_index(self.selectedIndex)
+        self.selectedPosition = positions[j0]
+        self._selectedIndex = j0
+        return nodes[j0]
+
+    def prev_node_index(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
         if i < 0: i = 1
         j = j0 = 1
         while j < i:
@@ -610,9 +652,7 @@ class LeoTreeModel(object):
                 j += 1
             else:
                 j += attrs[nodes[j]].size
-        self.selectedPosition = positions[j0]
-        self._selectedIndex = j0
-        return nodes[j0]
+        return j0
     #@+node:vitalije.20180516103325.1: *3* select_node_left
     def select_node_left(self, ev=None):
         '''If currently selected node is collapsed or has no
@@ -795,7 +835,7 @@ class LeoTreeModel(object):
 
         # finally to show indented nodes
         expanded.add(pos)
-
+        return True
     #@+node:vitalije.20180617204800.1: *3* promote_children
     def promote_children(self, pos):
         '''Turns children to siblings of pos'''
@@ -855,6 +895,7 @@ class LeoTreeModel(object):
                 pgnx = None # we don't want to skip this twice
                 continue
             update_size(attrs, x, 1 - sz0)
+        return True
     #@+node:vitalije.20180617170844.1: *3* indent_node
     def indent_node(self, pos):
         '''Moves right node at position pos'''
@@ -919,6 +960,7 @@ class LeoTreeModel(object):
 
         update_size(attrs, pgnx, -sz0)
         update_size(attrs, npgnx, sz0)
+        return True
     #@+node:vitalije.20180517183334.1: *3* dedent_node
     def dedent_node(self, pos):
         '''Moves node left'''
@@ -986,6 +1028,7 @@ class LeoTreeModel(object):
 
         self._update_children(pgnx)
         self._update_children(gpgnx)
+        return True
     #@+node:vitalije.20180518062711.1: *3* prev_visible_index
     def prev_visible_index(self, pos):
         '''Assuming this node is visible, search for previous
@@ -1140,6 +1183,7 @@ class LeoTreeModel(object):
                 ps = [random.random() for x in levs]
                 insert_node_data(self.data, (ps, ns, levs), npdist + pxi, pxi)
         update_size(attrs, npgnx, sz0)
+        return True
     #@+node:vitalije.20180613193129.1: *3* collapse_all
     def collapse_all(self):
         self.data.expanded.clear()
@@ -1219,24 +1263,48 @@ class LeoTreeModel(object):
         x = copy_ltmdata(self.data), extra
         self._undostack[i:] = [x]
         self._undopos = i
-
-
+    #@+node:vitalije.20180716143215.1: *3* discard_undo
+    def discard_undo(self):
+        if self._undopos >= 0:
+            self._undopos -= 1
+            self._undostack.pop()
+    #@+node:vitalije.20180716143218.1: *3* top_undo_extra
+    def top_undo_extra(self):
+        if self._undostack:
+            return self._undostack[-1][1]
+    #@+node:vitalije.20180716155438.1: *3* peek_redo_extra
+    def peek_redo_extra(self):
+        i = self._undopos + 1
+        if -1 < i < len(self._undostack):
+            return self._undostack[i][1]
+    #@+node:vitalije.20180716160056.1: *3* peek_undo_extra
+    def peek_undo_extra(self):
+        i = self._undopos
+        if -1 < i < len(self._undostack):
+            return self._undostack[i][1]
     #@+node:vitalije.20180614214753.1: *3* undo
     def undo(self):
         i = self._undopos
         if i < 0:
             return
-        self.data, extra = self._undostack[i]
+        udata, extra = self._undostack[i]
+        self._undostack[i] = self.data, extra
+        self.data = udata
         self._undopos = i - 1
         return extra
     #@+node:vitalije.20180614214757.1: *3* redo
     def redo(self):
         i = self._undopos + 1
-        if i > len(self._undostack):
+        if i >= len(self._undostack):
             return
         self._undopos = i
-        self.data, extra = self._undostack[i]
+        udata, extra = self._undostack[i]
+        self._undostack[i] = self.data, extra
+        self.data = udata
         return extra
+    #@+node:vitalije.20180711222659.1: *3* to_leo_pos
+    def to_leo_pos(self, p, c):
+        return to_leo_pos(self.data, p, c)
     #@-others
 
 
