@@ -47,6 +47,7 @@ def svgexp(pref, findex, ltm):
         if len(tr.positions) > i:
             x = tr.positions[i]
             gnx = tr.nodes[i]
+            isMarked = gnx in tr.marked
             apos = tuple('P%d'%x for x,y in enumerate(tr.nodes) if y == gnx)
             h, b, ps, chn, sz = tr.attrs[gnx]
             achn = [g2txt(x) for x in chn]
@@ -56,8 +57,8 @@ def svgexp(pref, findex, ltm):
                 pp = 'P0'
             else:
                 pp = 'P%d'%tr.levels.rfind(lev-1, 0, i)
-            return p2txt(x), pp, lev, sz, h, apos, g2txt(gnx), achn, aps
-        return '...', '...', -1, 0, '...nista...', tuple(), '...', tuple(), tuple()
+            return p2txt(x), pp, lev, sz, h, apos, g2txt(gnx), achn, aps, isMarked
+        return '...', '...', -1, 0, '...nista...', tuple(), '...', tuple(), tuple(), False
 
     def addrect(x, y, w, h, svg):
         svg.append('<svg:rect x="%f" y="%f" width="%f" height="%f" style="%s"/>'%(
@@ -95,8 +96,10 @@ def svgexp(pref, findex, ltm):
         addtext(66, 4, 'size', 4, res, False)
         for i in range(a, b):
             ri = 0.5 + i - a
-            p, pp, lev, sz, head, allpos, agnx, chn, pnts = row(tr, i)
+            p, pp, lev, sz, head, allpos, agnx, chn, pnts, isMarked = row(tr, i)
             addrect(0, ri * (h + 2), 20, h, res)
+            if isMarked:
+                addrect(14, ri * (h + 2) + 4, 4, h-8, res)
             addrect(22, ri * (h + 2), 20, h, res)
             addrect(44, ri * (h + 2), 20, h, res)
             addrect(66, ri * (h + 2), 20, h, res)
@@ -120,9 +123,9 @@ def svgexp(pref, findex, ltm):
        xmlns:xlink="http://www.w3.org/1999/xlink"
        xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
        xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
-       width="210mm"
-       height="235mm"
-       viewBox="0 0 210 235"
+       width="400mm"
+       height="205mm"
+       viewBox="0 0 400 255"
        version="1.1"
        id="svg8">'''.split('\n'))
     def mksvg(cont, sx, sy):
@@ -238,6 +241,12 @@ class LTM_rule_machine(RuleBasedStateMachine):
         if self.mdebug:print('%d -> %d'%(pi, pi1))
         return ps[pi1]
 
+    def int2int(self, pi):
+        N = len(self.model.data.positions) - 1
+        pi1 = 1 + (abs(pi) % N)
+        if self.mdebug:print('%d -> %d'%(pi, pi1))
+        return pi1
+
     def replace_ok(self, p1, p2):
         (positions, nodes, attrs, levels, expanded, marked) = self.model.data
 
@@ -288,9 +297,9 @@ class LTM_rule_machine(RuleBasedStateMachine):
         if n1 != n2:self.err()
         assert n1 == n2
 
-    @precondition(lambda self:hasattr(self, 'model'))
     @invariant()
     def gnxes_are_correct(self):
+        if not hasattr(self, 'model'): return
         td = self.model.data
         zlev = zip(range(len(td.nodes)), td.nodes, td.levels)
 
@@ -300,12 +309,49 @@ class LTM_rule_machine(RuleBasedStateMachine):
                 assert gnx == chn[j], 'wrong order of children %r'%((i1, x, chn, j, i, gnx),)
                 assert td.levels[i] == lev + 1, 'wrong level of direct child %r'%((x,i1, i, j, gnx),)
                 assert chn.count(gnx) == td.attrs[gnx][2].count(x), 'wrong number of parent links'
+
+    @invariant()
+    def marked_contains_no_extra_gnxes(self):
+        if not hasattr(self, 'model'): return
+        marked = self.model.data.marked
+        attrs = self.model.data.attrs
+        for x in marked:
+            assert x in attrs, 'marked contains gnx which does not exist in attrs %r'%x
+    @rule(pi=st.integers())
+    def mark_set(self, pi):
+        pos = self.int2pos(pi)
+        self.model.set_mark(pos)
+
+    @rule(pi=st.integers())
+    def mark_clear(self, pi):
+        pos = self.int2pos(pi)
+        self.model.clear_mark(pos)
+
+    @precondition(lambda self:self.model.size < 300)
+    @rule(pi=st.integers())
+    def clone_marked(self, pi):
+        pos = self.int2pos(pi)
+        self.model.selectedPosition = pos
+        self.model.clone_marked(new_gnx)
+
+    @precondition(lambda self:self.model.size < 300)
+    @rule(pi=st.integers())
+    def delete_marked(self, pi):
+        pos = self.int2pos(pi)
+        self.model.selectedPosition = pos
+        self.model.clone_marked(new_gnx)
+
     @rule(p1=st.integers(), p2=st.integers())
     def replace_node(self, p1, p2):
         tr, gnx = self.replace_ok(p1, p2)
         if tr:
             tr.change_gnx(tr.data.nodes[0], gnx)
             self.model.replace_node(tr)
+
+    @rule(pi=st.integers())
+    def sort_children(self, pi):
+        self.model.sort_children(self.int2pos(pi))
+
     @rule(pi=st.integers())
     def toggle_node(self, pi):
         self.model.toggle(self.int2pos(pi))
@@ -313,7 +359,7 @@ class LTM_rule_machine(RuleBasedStateMachine):
     @precondition(lambda self:self.model.size < 300)
     @rule(pi=st.integers())
     def clone_node(self, pi):
-        self.model.clone_node(self.int2pos(pi))
+        self.model.clone_node_i(self.int2int(pi))
 
     @rule(pi=st.integers())
     def move_node_down(self, pi):
@@ -344,7 +390,7 @@ class LTM_rule_machine(RuleBasedStateMachine):
         self.model.delete_node(self.int2pos(pi))
 
 def mkstate():
-    ltm = LeoTreeModel.from_bytes(open('tmp/trdata-save-1.bin', 'rb').read())
+    ltm = LeoTreeModel.from_bytes(open('tmp/trdata001.bin', 'rb').read())
     state = LTM_rule_machine()
     state.examplenum = 1
     state.errnum = 1
@@ -355,28 +401,46 @@ def mkstate():
 def do_example_1():
     import pdb
     state = mkstate()
-    state.err()
-    state.demote_node(pi=-117) # 6
-    state.err()
-    state.move_node_left(pi=19) # 6
-    state.err()
-    state.move_node_up(pi=1159926719) # 1
-    state.err()
+    state.err() # 1
     state.promote_node(pi=0) # 1
-    state.err()
-    state.clone_node(pi=631) # 2
-    state.err()
-    state.delete_node(pi=-90) # 1
-    state.err()
-    state.move_node_up(pi=470645401683362048) # 9
-    state.err()
-    state.clone_node(pi=31909) # 10
-    state.err()
-    state.promote_node(pi=256) # 4
-    state.err()
-    state.move_node_right(pi=-18431) # 7
-    state.err()
-    state.replace_node(p1=28277, p2=771) # 8, 2
+    state.err() # 2
+    state.toggle_node(pi=256) # 1
+    state.err() # 3
+    state.move_node_left(pi=-29091) # 4
+    state.err() # 4
+    state.move_node_left(pi=-8545) # 2
+    state.err() # 5
+    state.move_node_up(pi=66) # 3
+    state.err() # 6
+    state.clone_node(pi=-3774) # 7
+    state.err() # 7
+    state.clone_marked(pi=29926) # 2
+    state.err() # 8
+    state.clone_marked(pi=-4579) # 8
+    state.err() # 9
+    state.mark_clear(pi=-29222) # 9
+    state.err() # 10
+    state.move_node_down(pi=-10) # 2
+    state.err() # 11
+    state.clone_node(pi=6352) # 8
+    state.err() # 12
+    state.demote_node(pi=-24) # 5
+    state.err() # 13
+    state.mark_clear(pi=61) # 2
+    state.err() # 14
+    state.mark_clear(pi=-31100) # 1
+    state.err() # 15
+    state.promote_node(pi=27354) # 5
+    state.err() # 16
+    state.mark_set(pi=13875) # 6
+    state.err() # 17
+    state.mark_clear(pi=21021) # 2
+    state.err() # 18
+    state.replace_node(p1=-122, p2=72121929359983009) # (3,10)
+    state.err() # 19
+    state.demote_node(pi=-6) # 7
+    state.err() # 20
+    state.replace_node(p1=2907, p2=120) # (8,1)
     state.err()
 
 with settings(max_examples=90, stateful_step_count=1000,

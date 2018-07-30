@@ -7,6 +7,8 @@ import os
 import xml.etree.ElementTree as ET
 import pickle
 import time
+import base64
+import difflib
 random = _mrandom.Random()
 random.seed(12)
 class myrandom:
@@ -229,12 +231,12 @@ def to_ltm_pos(ltmdata, p):
     for (v, ci) in p.stack:
         i += 1
         while ci:
-            i += attrs[i].size
+            i += attrs[nodes[i]].size
             ci -= 1
     i += 1
     ci = p._childIndex
     while ci:
-        i += attrs[i].size
+        i += attrs[nodes[i]].size
         ci -= 1
     return positions[i]
 #@+node:vitalije.20180613161708.1: ** LTMData
@@ -250,6 +252,40 @@ def copy_ltmdata(data):
         set(data.expanded),
         set(data.marked)
     )
+#@+node:vitalije.20180726162502.1: ** transform_ltmdata
+def transform_ltmdata(t1, t2):
+    '''Transformes t1 to have same outline as t2, but keeping 
+       positions from t1 where possible.
+    '''
+    aseq = tuple(zip(t1.nodes, t1.levels))
+    bseq = tuple(zip(t2.nodes, t2.levels))
+    sm = difflib.SequenceMatcher(None, aseq, bseq, autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op in ('insert','replace'):
+            t1.positions[i1:i2] = t2.positions[j1:j2]
+            t1.nodes[i1:i2] = t2.nodes[j1:j2]
+            t1.levels[i1:i2] = t2.levels[j1:j2]
+        elif op == 'delete':
+            del t1.positions[i1:i2]
+            del t1.nodes[i1:i2]
+            del t1.levels[i1:i2]
+        elif op == 'equal':
+            continue
+    sync_attrs(t1.attrs, t2.attrs)
+
+def sync_attrs(a1, a2):
+    # a1.clear()
+    # a1.update(a2)
+    #    this might invalidate pdata instances from t1
+    #    it is safer to do it 
+    for k, v in a2.items():
+        if k in a1:
+            a1[k].copy_from(v)
+        else:
+            a1[k] = v
+    remgnx = set(a1.keys()) - set(a2.keys())
+    for x in remgnx:
+        a1.pop(x)
 #@+node:vitalije.20180625191254.1: ** NData
 class NData:
     fieldnames = 'h', 'b', 'parents', 'children', 'size'
@@ -272,6 +308,12 @@ class NData:
 
     def copy(self):
         return NData(self.h, self.b, self.parents, self.children, self.size)
+    def copy_from(self, other):
+        self.h = other.h
+        self.b = other.b
+        self.parents[:] = other.parents
+        self.children[:] = other.children
+        self.size = other.size
 
     def deepCopy(self):
         return NData(self.h, self.b, self.parents[:], self.children[:], self.size)
@@ -282,6 +324,8 @@ class NData:
         yield self.parents
         yield self.children
         yield self.size
+#@+node:vitalije.20180727125449.1: ** PData
+PData = namedtuple('PData', 'i pos gnx lev nd')
 #@+node:vitalije.20180510153738.1: ** LeoTreeModel
 class LeoTreeModel(object):
     '''Model representing all of Leo outline data.
@@ -302,7 +346,29 @@ class LeoTreeModel(object):
         self._selectedIndex = -1
         self._undostack = []
         self._undopos = -1
+        self._vis_top = 0
     #@+others
+    #@+node:vitalije.20180727123721.1: *3* normalize
+    def normalize(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if positions[i] != pos:
+            try:
+                i = positions.index(pos)
+            except ValueError:
+                return PData(0, positions[0], nodes[0], 0, attrs[nodes[0]])
+            gnx = nodes[i]
+            return PData(i, pos, gnx, levels[i], attrs[gnx])
+        nd1 = attrs[gnx]
+        if nd1 is not nd:
+            return PData(i, pos, gnx, levels[i], nd1)
+        return pdata
+
+    def mkpos(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        if i >= len(nodes): i = 0
+        gnx = nodes[i]
+        return PData(i, positions[i], gnx, levels[i], attrs[gnx])
     #@+node:vitalije.20180510153738.2: *3* parents
     def parents(self, gnx):
         '''Returns list of gnxes of parents of node with given gnx'''
@@ -315,20 +381,234 @@ class LeoTreeModel(object):
         a = self.data.attrs.get(gnx)
         return a.children if a else []
 
-    #@+node:vitalije.20180622143953.1: *3* _child_iterator
+    #@+node:vitalije.20180718200706.1: *3* ...iterators...
+    def is_visible(self, pos):
+        return self.is_visilbe_i(self.positions.index(pos))
+
+    def is_visible_i(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        lev = levels[i]
+        if lev == 1:
+            return True
+        while lev > 1:
+            lev -= 1
+            i = levels.rfind(lev, 0, i)
+            if positions[i] not in expanded:
+                return False
+        return True
+    #@+node:vitalije.20180622143953.1: *4* _child_iterator
     def _child_iterator(self, i):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
 
         pgnx = nodes[i]
-
-        B = attrs[pgnx].size + i
+        nd = attrs[pgnx]
         i += 1
-        j = 0
+        for j, gnx in enumerate(nd.children):
+            yield j, i, gnx
+            i += attrs[gnx].size
+    #@+node:vitalije.20180727135224.1: *5* pos_unique_subtree
+    def pos_unique_subtree(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        B = i + nd.size
+        i += 1
+        seen = set()
         while i < B:
             gnx = nodes[i]
-            yield j, i, gnx
-            j += 1
-            i += attrs[gnx].size
+            if gnx in seen:
+                i += attrs[gnx].size
+            else:
+                seen.add(gnx)
+                nd = attrs[gnx]
+                yield PData(i, positions[i], gnx, levels[i], nd)
+                i += 1
+    #@+node:vitalije.20180727135230.1: *5* pos_child_iterator
+    def pos_child_iterator(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        B = i + nd.size
+        i += 1
+        while i < B:
+            gnx = nodes[i]
+            nd = attrs[gnx]
+            yield PData(i, positions[i], gnx, levels[i], nd)
+            i += nd.size
+    #@+node:vitalije.20180727143912.1: *4* UNL
+    def UNL_simple(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        res = []
+        while i > 0:
+            res.append(attrs[nodes[i]].h)
+            i = parent_index(levels, i)
+        res.reverse()
+        return '-->'.join(x.replace('-->', '--%3E') for x in res)
+
+    def UNL_with_indexes(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        res = []
+        while i > 0:
+            pi = parent_index(levels, i)
+            if i == pi + 1:
+                h = attrs[nodes[i]].h.replace('-->', '--%3E') + ':0'
+            else:
+                h = self._UNL_ind(nodes, attrs, levels, i, pi)
+            res.append(h)
+            i = pi
+        res.reverse()
+        return '-->'.join(res)
+
+    def _UNL_ind(self, nodes, attrs, levels, i, pi):
+        h = attrs[nodes[i]].h
+        lev = levels[i]
+        count = 0
+        while i > pi + 1:
+            i = levels.rfind(lev, pi, i)
+            if h == attrs[nodes[i]].h: count += 1
+        return h.replace('-->', '--%3E') + ':%d'%count
+    #@+node:vitalije.20180718153808.1: *4* subtree_iter_from
+    def subtree_iter_from(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        sz = attrs[nodes[i]].size
+        for j in range(i, i+sz):
+            yield positions[j], j
+    #@+node:vitalije.20180718200730.1: *4* following_siblings_from
+    def following_siblings_from(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        N = len(positions)
+        lev = levels[i]
+        i += attrs[nodes[i]].size
+        while i < N and levels[i] == lev:
+            yield positions[i], i
+            i += attrs[nodes[i]].size
+
+    def following_siblings_pos(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if i:
+            if pos != positions[i]:
+                i = positions.index(pos)
+            N = len(positions)
+            i += nd.size
+            while i < N and levels[i] == lev:
+                yield self.mkpos(i)
+                i += attrs[nodes[i]].size
+    #@+node:vitalije.20180723151757.1: *4* next_sibling_i
+    def next_sibling_i(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        lev = levels[i]
+        j = attrs[nodes[i]].size + i
+        if j < len(levels) and levels[j] == lev: return j
+        return 0
+
+    #@+node:vitalije.20180723203232.1: *4* prev_sibling_i
+    def prev_sibling_i(self, i):
+        if i < 2: return 0
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        lev = levels[i]
+        if lev - 1 == levels[i-1]: return 0
+        j = levels.rfind(lev, 0, i)
+        return max(0, j)
+    #@+node:vitalije.20180727140734.1: *4* last_child
+    def last_child(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        gnx = nodes[i]
+        sz = attrs[gnx].size
+        if sz < 2:return 0
+        lev = levels[i] + 1
+        j = levels.rfind(lev, i, i + sz)
+        return max(0, j)
+
+    def last_child_pos(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if i == 0: return pdata
+        if pos != positions[i]:
+            i = positions.index(pos)
+        lgnx = nd.children[-1]
+        return self.mkpos(i + nd.size - attrs[lgnx].size)
+    #@+node:vitalije.20180727141314.1: *4* last_node
+    def last_node(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        gnx = nodes[i]
+        sz = attrs[gnx].size
+        if sz < 2:return 0
+        return i + sz - 1
+
+    def last_node_pos(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if i == 0: return pdata
+        if pos != positions[i]:
+            i = positions.index(pos)
+        return self.mkpos(i + nd.size - 1)
+
+    #@+node:vitalije.20180728130307.1: *4* exists
+    def exists(self, pdata, root=None):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if i == 0: return False
+        if positions[i] != pos:
+            i = positions.index(pos)
+        if root:
+            ir, rpos, rgnx, rlev, rnd = root
+            if positions[ir] != rpos:
+                ir = positions.index(rpos)
+            return ir <= i < ir + rnd.size
+        return True
+    #@+node:vitalije.20180723152016.1: *4* pos_after_delete_i
+    def pos_after_delete_i(self, i):
+        j = self.vis_back_i(i)
+        j = j or self.next_sibling_i(i)
+        return self.data.positions[j] if j else None
+    #@+node:vitalije.20180718221153.1: *4* vis_back_i
+    def vis_back_i(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        # assumes i is visible
+        a = self._vis_top
+        if levels[i-1] == levels[i]+1:
+            return i-1 if a < i-1 else 0
+        j = levels.rfind(levels[i], 0, i-1)
+        while j < i:
+            if positions[j] in expanded:
+                dj = 1
+            else:
+                dj = attrs[nodes[j]].size
+            if j + dj >= i:
+                return j if a < j else 0
+            j += dj
+        return 0
+    #@+node:vitalije.20180718221548.1: *4* vis_next_i
+    def vis_next_i(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        # assumes i is visible
+        if positions[i] in expanded:
+            i += 1
+        else:
+            i += attrs[nodes[i]].size
+        a = self._vis_top
+        b = a + attrs[nodes[a]].size
+        return i if a < i < b else 0
+    #@+node:vitalije.20180718200733.1: *4* parent_index
+    def parent_index(self, i):
+        return parent_index(self.data.levels, i)
+    #@+node:vitalije.20180718200737.1: *4* child_index
+    def child_index(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = pdata
+        if positions[i] != pos:
+            i = positions.index(pos)
+        pi = parent_index(levels, i) + 1
+        lev = levels[i]
+        return levels[pi:i].count(lev)
+    #@+node:vitalije.20180718200740.1: *4* all_siblings_from
+    def all_siblings_from(self, i):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i = parent_index(levels, i) + 1
+        N = len(positions)
+        lev = levels[i]
+        while i < N and levels[i] == lev:
+            yield positions[i], i
+            i += attrs[nodes[i]].size
     #@+node:vitalije.20180613193835.1: *3* size
     @property
     def size(self):
@@ -337,9 +617,19 @@ class LeoTreeModel(object):
     #@+node:vitalije.20180613194129.1: *3* body
     def body(self, gnx):
         return self.data.attrs[gnx].b
+
+    def set_b(self, gnx, b):
+        self.data.attrs[gnx].b = b
     #@+node:vitalije.20180613194137.1: *3* head
     def head(self, gnx):
         return self.data.attrs[gnx].h
+
+    def set_h(self, gnx, h):
+        self.data.attrs[gnx].h = h.replace('\n', '')
+    #@+node:vitalije.20180723174759.1: *3* size_gnx
+    def size_gnx(self, gnx):
+        a = self.data.attrs.get(gnx)
+        return a.size if a else 0
     #@+node:vitalije.20180620135448.1: *3* isClone
     def isClone(self, gnx):
         return len(self.data.attrs[gnx].parents) > 1
@@ -347,8 +637,9 @@ class LeoTreeModel(object):
     @property
     def selectedIndex(self):
         p = self.selectedPosition
-        if p == self.data.positions[self._selectedIndex]:
-            return self._selectedIndex
+        si = max(0, self._selectedIndex)
+        if si < len(self.data.positions) and p == self.data.positions[si]:
+            return si
         try:
             i = self.data.positions.index(p)
             self._selectedIndex = i
@@ -367,6 +658,15 @@ class LeoTreeModel(object):
     def selectedGnx(self):
         i = self.selectedIndex
         return self.data.nodes[i]
+
+    #@+node:vitalije.20180717195931.1: *3* selection
+    @property
+    def selection(self):
+        '''returns currently selected (index, gnx, h, b, size)'''
+        i = self.selectedIndex
+        gnx = self.data.nodes[i]
+        nd = self.data.attrs[gnx]
+        return i, gnx, nd.h, nd.b, nd.size
     #@+node:vitalije.20180613192640.1: *3* selectedBody
     @property
     def selectedBody(self):
@@ -392,9 +692,18 @@ class LeoTreeModel(object):
         i = self.data.positions.index(pos)
         return self.insert_leaf_i(i, gnx, h, b)
 
-    def insert_leaf_i(self, i, gnx, h, b):
+    def insert_leaf_i_after(self, i, gnx, h, b):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
         pi = parent_index(levels, i)
+        i += attrs[nodes[i]].size
+        return self.insert_leaf_i_pi(i, gnx, h, b, pi)
+
+    def insert_leaf_i(self, i, gnx, h, b):
+        pi = parent_index(self.data.levels, i)
+        return self.insert_leaf_i_pi(i, gnx, h, b, pi)
+
+    def insert_leaf_i_pi(self, i, gnx, h, b, pi):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
         pp = positions[pi]
         di0 = i - pi
         pgnx = nodes[pi]
@@ -415,17 +724,86 @@ class LeoTreeModel(object):
         update_size(attrs, pgnx, 1)
         self._update_children(pgnx)
         return retp
-    #@+node:vitalije.20180616125730.1: *3* clone_node
-    def clone_node(self, pos):
+    #@+node:vitalije.20180724085428.1: *3* insert_node
+    def insert_node(self, t, i, lev):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
-        if pos == positions[0]: return
+        (tpositions, tnodes, tattrs, tlevels, texpanded, tmarked) = t.data
+        if lev == 1:
+            pi = 0
+        else:
+            pi = levels.rfind(lev - 1, 0, i)
+
+        pgnx = nodes[pi]
+        psz = attrs[pgnx].size
+        dpi = i - pi
+        rpos = positions[i-1]
+        sz = len(tpositions)
+
+        def insOne(j, zlev):
+            levels[j:j] = (x + zlev for x in tlevels)
+            positions[j:j] = (random.random() for x in tpositions)
+            nodes[j:j] = tnodes
+
+        for pxi in gnx_iter(nodes, pgnx, psz + sz):
+            insOne(pxi + dpi, levels[pxi] + 1)
+
+        # keep other parents of pasted node
+        prnts = attrs.get(tnodes[0], None)
+        prnts = prnts.parents if prnts else []
+        prnts.append(pgnx)
+        tattrs[tnodes[0]].parents.extend(prnts)
+
+        # sync attrs
+        for k, v in tattrs.items():
+            if k in attrs:
+                v1 = attrs[k]
+                v1.copy_from(v)
+            else:
+                attrs[k] = v
+        update_size(attrs, pgnx, sz)
+        self._update_children(pgnx)
+        i = positions.index(rpos) + 1
+        assert nodes[i] == tnodes[0], attrs[nodes[i]].h + ' is not ' + attrs[tnodes[0]].h
+        return positions[i]
+    #@+node:vitalije.20180726202438.1: *3* relink_as_clone_of
+    def relink_as_clone_of(self, i, j):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+
+        lev = levels[i]
+        pos = positions[i]
+        pi = parent_index(levels, i)
+        ppos = positions[pi]
+        dpi = i - pi
+
+        gnx = nodes[j]
+        sz = attrs[gnx].size
+
+        pgnx = nodes[pi]
+
+        if pgnx in nodes[j:j+sz]:
+            return
+
+        t = self.subtree(positions[j])
+
+        self.delete_node(pos)
+
+        pi = positions.index(ppos)
+        i = dpi + pi
+
+        npos = self.insert_node(t, i, lev)
+        i = positions.index(npos)
+        positions[i] = pos
+    #@+node:vitalije.20180616125730.1: *3* clone_node
+    def clone_node_i(self, i):
+        return self.clone_node(self.mkpos(i))
+
+    def clone_node(self, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev0, nd = pdata
+        if i == 0: return
 
         # this node
-        i = positions.index(pos)
-        gnx = nodes[i]
-        sz0 = attrs[gnx].size
-        lev0 = levels[i]
-        levs = [x - lev0 for x in levels[i:i+sz0]]
+        sz0 = nd.size
 
         # parent
         pi = parent_index(levels, i)
@@ -447,20 +825,105 @@ class LeoTreeModel(object):
 
         attrs[gnx].parents.append(pgnx)
         self._update_children(pgnx)
+        i = positions.index(pos)
+        return PData(i+sz0, positions[i+sz0], gnx, lev0, nd)
+    #@+node:vitalije.20180724120429.1: *3* clone_marked
+    def clone_marked(self, gengnx):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        if not marked: return
+        i = self.selectedIndex
+        pi = parent_index(levels, i)
+        i += attrs[nodes[i]].size
+        pgnx = nodes[pi]
+        def cando(x):
+            if x in marked:
+                return False
+            for x1 in attrs[x].parents:
+                if cando(x1):continue
+                return False
+            return True
+        if not cando(pgnx): return
+        gnx = gengnx()
+        retp = self.insert_leaf_i_pi(i, gnx, 'Clones of marked nodes', '', pi)
+        chn = attrs[gnx].children
+        chn.extend(marked)
+        nps = []
+        nns = []
+        lev = levels[i] + 1
+        levs = []
+        for x in chn:
+            nd = attrs[x]
+            nd.parents.append(gnx)
+            j = nodes.index(x)
+            k = j + nd.size
+            lz = levels[j]
+            nns.extend(nodes[j:k])
+            levs.extend(x-lz for x in levels[j:k])
+        update_size(attrs, gnx, len(nns))
+        n = len(nns)
+        for pxi in gnx_iter(nodes, gnx, len(nns) + 1):
+            a = pxi + 1
+            nodes[a:a] = nns
+            positions[a:a] = (random.random() for x in range(n))
+            lz = levels[pxi] + 1
+            levels[a:a] = (x+lz for x in levs)
+
+        self.selectedPosition = retp
         return True
+    #@+node:vitalije.20180724204158.1: *3* delete_marked
+    def delete_marked(self):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        if not marked: return
+        rgnx = nodes[0]
+        chn = set(attrs[rgnx].children)
+        if not (chn - marked): return
+
+        def delone(gnx):
+            nd = attrs[gnx]
+            sz = nd.size
+            for pgnx in nd.parents:
+                if pgnx not in attrs: continue
+                chn = attrs[pgnx].children
+                n = len(chn)
+                chn[:] = (x for x in chn if x != gnx)
+                n = n - len(chn)
+                update_size(attrs, pgnx, - n * sz)
+
+            for i in gnx_iter(nodes, gnx, 1):
+                del positions[i:i+sz]
+                del nodes[i:i+sz]
+                del levels[i:i+sz]
+        for x in marked:
+            if x in attrs:
+                delone(x)
+                attrs.pop(x)
+        marked.clear()
+        return True
+    #@+node:vitalije.20180724163137.1: *3* set_mark
+    def set_mark(self, pos):
+        i = self.data.positions.index(pos)
+        gnx = self.data.nodes[i]
+        self.data.marked.add(gnx)
+
+    #@+node:vitalije.20180724163425.1: *3* clear_mark
+    def clear_mark(self, pos):
+        i = self.data.positions.index(pos)
+        gnx = self.data.nodes[i]
+        self.data.marked.discard(gnx)
     #@+node:vitalije.20180616151338.1: *3* _update_children
     def _update_children(self, pgnx):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
 
         i = nodes.index(pgnx)
-        chn = []
+        del attrs[pgnx].children[:]
+        chn = attrs[pgnx].children
         B = i + attrs[pgnx].size
         j = i + 1
         while j < B:
             cgnx = nodes[j]
             chn.append(cgnx)
             j += attrs[cgnx].size
-        attrs[pgnx].children = chn
+
     #@+node:vitalije.20180531210047.1: *3* change_gnx
     def change_gnx(self, gnx1, gnx2):
         if gnx2 in self.data.attrs:
@@ -541,6 +1004,8 @@ class LeoTreeModel(object):
         updateParentSize(gnx)
 
         clean_parents(attrs1, nodes1, ns)
+        marked1.intersection_update(attrs1.keys())
+        
     #@+node:vitalije.20180510153738.5: *3* delete_node
     def delete_node(self, pos):
         ( positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -587,18 +1052,43 @@ class LeoTreeModel(object):
         attrs[gnx].parents.remove(pgnx)
         self._update_children(pgnx)
         clean_parents(attrs, nodes, ns)
+        marked.intersection_update(attrs.keys())
         if select:
             self.selectedPosition = select
             self._selectedIndex = positions.index(select)
         return True
+    #@+node:vitalije.20180718232820.1: *3* delete_all_children
+    def delete_all_children(self, pos):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i = positions.index(pos)
+        gnx = nodes[i]
+        nd = attrs[gnx]
+        sz = nd.size
+        if sz == 1: return False
+        for ch in nd.children:
+            attrs[ch].parents.remove(gnx)
+        del attrs[gnx].children[:]
+        removed = set(nodes[i+1:i+sz])
+        for pi in gnx_iter(nodes, gnx, 1):
+            expanded.difference_update(positions[pi+1:pi+sz])
+            del positions[pi+1:pi+sz]
+            del nodes[pi+1:pi+sz]
+            del levels[pi+1:pi+sz]
+        removed.difference_update(nodes)
+        for x in removed:
+            attrs.pop(x)
+            marked.discard(x)
+        update_size(attrs, gnx, 1 - sz)
+        return True
     #@+node:vitalije.20180515122209.1: *3* display_items
     def display_items(self, skip=0, count=None):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
-        Npos = len(positions)
+        i = self._vis_top
+        Npos = attrs[nodes[i]].size
         if count is None: count = Npos
 
         selInd = self.selectedIndex
-        i = 1
+        i += 1
         while count > 0 and i < Npos:
             gnx = nodes[i]
             pos = positions[i]
@@ -620,6 +1110,45 @@ class LeoTreeModel(object):
                 i += 1
             else:
                 i += sz
+    #@+node:vitalije.20180724194846.1: *3* sort_children
+    def sort_children(self, pos):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        pi = positions.index(pos)
+        pgnx = nodes[pi]
+        pnd = attrs[pgnx]
+        if len(pnd.children) < 2: return
+
+        blocks = []
+        for j, i, gnx in self._child_iterator(pi):
+            nd = attrs[gnx]
+            blocks.append((nd.h.lower(), i, i + nd.size))
+        blocks.sort()
+        iss = []
+        is_sorted = True
+        last_a = -1
+        for h, a, b in blocks:
+            iss.extend(range(a-pi-1, b-pi-1))
+            is_sorted = is_sorted and last_a < a
+            last_a = a
+
+        if is_sorted:
+            return
+
+        def swap(ar, a, b):
+            xs = list(ar[a:b])
+            ar[a:b] = (xs[i] for i in iss)
+
+        ns = [nodes[xi+pi+1] for xi in iss]
+
+        for pxi in gnx_iter(nodes, pgnx, pnd.size):
+            a = pxi + 1
+            b = pxi + pnd.size
+            swap(positions, a, b)
+            swap(levels, a, b)
+            nodes[a:b] = ns
+
+        self._update_children(pgnx)
+        return True
     #@+node:vitalije.20180515155021.1: *3* select_next_node
     def select_next_node(self, ev=None):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -687,6 +1216,19 @@ class LeoTreeModel(object):
             self.selectedPosition = positions[i + 1]
             self._selectedIndex = i + 1
             return nodes[i + 1]
+    #@+node:vitalije.20180719142322.1: *3* revive_position
+    def revive_position(self, i, gnx):
+        '''Searches for the closest occurrence of gnx around index i.
+           returns tuple (i, pos, gnx)'''
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i = max(0, min(len(positions) - 1, i))
+        i0 = 0
+        for j in gnx_iter(nodes, gnx, 1):
+            if abs(i - j) < abs(i - i0):
+                i0 = j
+            if j > i:
+                break
+        return i0, positions[0], nodes[0]
     #@+node:vitalije.20180518124047.1: *3* visible_positions
     @property
     def visible_positions(self):
@@ -701,8 +1243,8 @@ class LeoTreeModel(object):
         self._visible_positions_last = self._visible_positions_serial
         (positions, nodes, attrs, levels, expanded, marked) = self.data
         def it():
-            j = 1
-            N = len(positions)
+            j = self._vis_top + 1
+            N = attrs[nodes[j-1]].size
             while j < N:
                 p1 = positions[j]
                 yield p1
@@ -712,6 +1254,11 @@ class LeoTreeModel(object):
                     j += attrs[nodes[j]].size
         self._visible_positions = tuple(it())
         return self._visible_positions
+
+    def set_vis_top(self, i):
+        if i == self._vis_top: return
+        self._vis_top = i
+        self.invalidate_visual()
     #@+node:vitalije.20180516150626.1: *3* subtree
     def subtree(self, pos):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -736,6 +1283,85 @@ class LeoTreeModel(object):
 
         return t
 
+    #@+node:vitalije.20180718223059.1: *3* subtree_new
+    def subtree_new(self, pos, gnxgen):
+        t = self.subtree(pos)
+        return t.renew(gnxgen)
+
+    def renew(self, gnxgen):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        nattrs = {}
+        ngnxes = {}
+        for x, nd in attrs.items():
+            y = gnxgen()
+            ngnxes[x] = y
+            nattrs[y] = nd.copy()
+
+        nexp = set()
+        nmark = set()
+        def swap(xs):
+            for i, x in enumerate(xs):
+                xs[i] = ngnxes[x]
+
+        for x,nd in nattrs.items():
+            swap(nd.children)
+            swap(nd.parents)
+
+        for x in marked:
+            nmark.add(ngnxes[x])
+
+        for i, p in enumerate(positions):
+            p1 = random.random()
+            positions[i] = p1
+            nodes[i] = ngnxes[nodes[i]]
+            if p in expanded:
+                nexp.add(p1)
+        sync_attrs(attrs, nattrs)
+        expanded.clear()
+        marked.clear()
+        expanded.update(nexp)
+        marked.update(nmark)
+        return self
+    #@+node:vitalije.20180724082146.1: *3* to_clipboard
+    def to_clipboard(self):
+        return base64.standard_b64encode(self.to_bytes()).decode('ascii')
+
+    @staticmethod
+    def from_clipboard(s):
+        ltm = LeoTreeModel()
+        bs = base64.standard_b64decode(s)
+        return ltm.restore_from_bytes(bs)
+
+
+    def cut_node(self, pos):
+        t = self.subtree(pos)
+        self.delete_node(pos)
+        return t.to_clipboard()
+
+    def copy_node(self, pos):
+        t = self.subtree(pos)
+        (positions, nodes, attrs, levels, expanded, marked) = t.data
+        nexp = set()
+        for i, p in enumerate(positions):
+            np = random.random()
+            positions[i] = np
+            if p in expanded:
+                nexp.add(np)
+        return t.to_clipboard()
+
+    def read_clipboard(self, s):
+        return LeoTreeModel.from_clipboard(s)
+
+    def paste_as_new(self, s, i, pi, gnxgen):
+        try:
+            t = LeoTreeModel.from_clipboard(s)
+        except ValueError:
+            return False
+        t = t.renew(gnxgen)
+        gnx = t.data.nodes[0]
+        nd = t.data.attrs[gnx]
+        lev = self.data.levels[pi] + 1
+        return self.insert_node(t, i, lev)
     #@+node:vitalije.20180516132431.1: *3* promote
     def promote(self, pos):
         '''Makes following siblings of pos, children of pos'''
@@ -1171,7 +1797,9 @@ class LeoTreeModel(object):
 
         # most likely index was changed by deletion, lets recalculate
         npi = positions.index(np)
-        if ndp < 1:
+        if A == B:
+            npdist = 1
+        elif ndp < 1:
             npdist = positions.index(ndp) - npi
         else: 
             npdist = len(positions) - npi
@@ -1184,6 +1812,22 @@ class LeoTreeModel(object):
                 insert_node_data(self.data, (ps, ns, levs), npdist + pxi, pxi)
         update_size(attrs, npgnx, sz0)
         return True
+    #@+node:vitalije.20180728120728.1: *3* move_to_nth_child
+    def move_to_nth_child(self, pd1, pd2, n):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i1, pos1, gnx1, lev1, nd1 = pd1
+        i2, pos2, gnx2, lev2, nd2 = pd2
+        if i1 == 0: return pd1
+        if positions[i1] != pos1:
+            i1 = positions.index(pos1)
+        if positions[i2] != pos2:
+            i2 = positions.index(pos2)
+        i = i2 + 1
+        for gnx in nd2.children[:n]:
+            i += attrs[gnx].size
+        self.move_node_to_index(i1, i, i2)
+        i1 = positions.index(pos1)
+        return self.mkpos(i1)
     #@+node:vitalije.20180613193129.1: *3* collapse_all
     def collapse_all(self):
         self.data.expanded.clear()
@@ -1205,6 +1849,18 @@ class LeoTreeModel(object):
             self.data.expanded.remove(p)
         else:
             self.data.expanded.add(p)
+
+
+    #@+node:vitalije.20180719010559.1: *3* expand_node
+    def expand_node(self, pos):
+        self.data.expanded.add(pos)
+
+    #@+node:vitalije.20180719010645.1: *3* is_expanded
+    def is_expanded(self, pos):
+        return pos in self.data.expanded
+    #@+node:vitalije.20180719010555.1: *3* collapse_node
+    def collapse_node(self, pos):
+        self.data.expanded.discard(pos)
     #@+node:vitalije.20180518155629.1: *3* body_change
     def body_change(self, newbody):
         i = self.selectedIndex
@@ -1283,30 +1939,53 @@ class LeoTreeModel(object):
         if -1 < i < len(self._undostack):
             return self._undostack[i][1]
     #@+node:vitalije.20180614214753.1: *3* undo
-    def undo(self):
+    def undo(self, uextra):
         i = self._undopos
         if i < 0:
             return
         udata, extra = self._undostack[i]
-        self._undostack[i] = self.data, extra
+        self._undostack[i] = self.data, uextra
         self.data = udata
         self._undopos = i - 1
         return extra
     #@+node:vitalije.20180614214757.1: *3* redo
-    def redo(self):
+    def redo(self, rextra):
         i = self._undopos + 1
         if i >= len(self._undostack):
             return
         self._undopos = i
         udata, extra = self._undostack[i]
-        self._undostack[i] = self.data, extra
+        self._undostack[i] = self.data, rextra
         self.data = udata
         return extra
     #@+node:vitalije.20180711222659.1: *3* to_leo_pos
     def to_leo_pos(self, p, c):
         return to_leo_pos(self.data, p, c)
     #@-others
+    def copy_data(self):
+        return copy_ltmdata(self.data)
 
+    def sync_from_leo(self, v):
+        if not v.children: return
+        i = max(1, self.selectedIndex)
+        t2 = vnode2treemodel(v)
+        i = min(len(t2.data.positions) - 1, i)
+        transform_ltmdata(self.data, t2.data)
+        self.invalidate_visual()
+        if self.selectedPosition not in self.data.positions:
+            self.selectedPosition = self.data.positions[i]
+
+    def sync_to_leo(self, c):
+        attrs = self.data.attrs
+        getv = c.get_node
+        rgnx = self.data.nodes[0]
+        def do_one(gnx):
+            v = getv(gnx)
+            if gnx != rgnx:
+                v.parents[:] = (getv(x) for x in attrs[x].parents)
+            v.children[:] = (getv(x) for x in attrs[x].children)
+        for x in attrs:
+            do_one(x)
 
 #@+node:vitalije.20180617172952.1: ** low level utils
 #@+at
@@ -2076,6 +2755,7 @@ def p_at_file_iterator(ltmdata, pos, delim_st, delim_en):
         yield pos, line, lln
 #@+node:vitalije.20180529143138.1: ** new_gnx
 def new_gnx_generator(_id):
+    random = _mrandom
     nind = lambda:_id + time.strftime('.%Y%m%d%H%M%S', time.localtime())
     curr = [nind()]
     chars = 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
