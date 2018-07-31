@@ -189,6 +189,13 @@ def paths(ltm, loaddir):
         if m:
             res[gnx].append(jpath(m.group(2)))
     return res
+#@+node:vitalije.20180731211311.1: ** chapter_name
+_chapter_name_cleaner = re.compile(r'[^-0-9A-Za-z]+', re.ASCII)
+def chapter_name(s):
+    if not s.startswith('@chapter '):return ''
+    name, sep, binding = s[9:].strip().partition('@')
+    name = '-'.join(name.strip().split())
+    return _chapter_name_cleaner.sub('', name)[:128]
 #@+node:vitalije.20180624125820.1: ** gnx_iter
 def gnx_iter(nodes, gnx, sz=1):
     i = 0
@@ -465,6 +472,38 @@ class LeoTreeModel(object):
             i = levels.rfind(lev, pi, i)
             if h == attrs[nodes[i]].h: count += 1
         return h.replace('-->', '--%3E') + ':%d'%count
+    #@+node:vitalije.20180731211148.1: *4* chapter_names
+    def chapter_names(self):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        seen = set()
+        yield 0, positions[0], 'main'
+        i = 1
+        N = len(positions)
+        while i < N:
+            gnx = nodes[i]
+            nd = attrs[gnx]
+            if gnx in seen:
+                i += nd.size
+            else:
+                s = chapter_name(nd.h)
+                if s:
+                    yield i, positions[i], s
+                i += 1
+
+    def chapter_name_for_pos(self, pos):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        j = positions.index(pos)
+        while j > 0:
+            s = chapter_name(attrs[nodes[j]].h)
+            if s:
+                return s
+            j = parent_index(levels, j)
+        return 'main'
+
+    def position_is_in_chapter(self, rdata, pdata):
+        (positions, nodes, attrs, levels, expanded, marked) = self.data
+        i, pos, gnx, lev, nd = self.normalize(rdata)
+        return pdata.pos in positions[i+1:i+nd.size]
     #@+node:vitalije.20180718153808.1: *4* subtree_iter_from
     def subtree_iter_from(self, i):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
@@ -1084,7 +1123,8 @@ class LeoTreeModel(object):
     def display_items(self, skip=0, count=None):
         (positions, nodes, attrs, levels, expanded, marked) = self.data
         i = self._vis_top
-        Npos = attrs[nodes[i]].size
+        Npos = i + attrs[nodes[i]].size
+        z_lev = levels[i]
         if count is None: count = Npos
 
         selInd = self.selectedIndex
@@ -1105,7 +1145,7 @@ class LeoTreeModel(object):
                     pmicon = 'minus' if exp else 'plus'
                 else:
                     pmicon = 'none'
-                yield pos, gnx, h, levels[i], pmicon, iconVal, selInd == i
+                yield pos, gnx, h, levels[i] - z_lev, pmicon, iconVal, selInd == i
             if chn and exp:
                 i += 1
             else:
@@ -1243,8 +1283,9 @@ class LeoTreeModel(object):
         self._visible_positions_last = self._visible_positions_serial
         (positions, nodes, attrs, levels, expanded, marked) = self.data
         def it():
-            j = self._vis_top + 1
-            N = attrs[nodes[j-1]].size
+            j = self._vis_top
+            N = j + attrs[nodes[j]].size
+            j += 1
             while j < N:
                 p1 = positions[j]
                 yield p1
