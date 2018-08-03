@@ -441,7 +441,7 @@ def draw_tree(canv, ltm):
     #@+node:vitalije.20180518115534.1: *3* drawing loop
     i = 1
     for j, dd in enumerate(ltm.display_items(G.topIndex.get(), count)):
-        p, gnx, h, lev, pm, iconVal, sel = dd
+        p, gnx, h, lev, pm, iconVal, sel, has_siblings = dd
         pmicon = getattr(G.icons, pm)
         i = j * 3 + 1
         x = lev * LW - 20

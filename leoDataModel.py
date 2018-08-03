@@ -1145,7 +1145,8 @@ class LeoTreeModel(object):
                     pmicon = 'minus' if exp else 'plus'
                 else:
                     pmicon = 'none'
-                yield pos, gnx, h, levels[i] - z_lev, pmicon, iconVal, selInd == i
+                has_siblings = i + sz < Npos and levels[i+sz] == levels[i]
+                yield pos, gnx, h, levels[i] - z_lev, pmicon, iconVal, selInd == i, has_siblings
             if chn and exp:
                 i += 1
             else:
